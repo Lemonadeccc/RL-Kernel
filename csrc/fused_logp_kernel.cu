@@ -5,7 +5,7 @@
 
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t blockReduceMax(scalar_t val) {
-    static __shared__ float shared[32]; 
+    static __shared__ float shared[32];
     int lane = threadIdx.x % 32;
     int wid = threadIdx.x / 32;
 
@@ -62,7 +62,7 @@ __global__ void fused_logp_forward_kernel(
         local_max = max(local_max, static_cast<float>(row_logits[i]));
     }
     float max_val = blockReduceMax<float>(local_max);
-    
+
     __shared__ float res_max;
     if (threadIdx.x == 0) res_max = max_val;
     __syncthreads();
@@ -72,7 +72,7 @@ __global__ void fused_logp_forward_kernel(
         local_sum += expf(static_cast<float>(row_logits[i]) - res_max);
     }
     float sum_val = blockReduceSum<float>(local_sum);
-    
+
     __shared__ float res_sum;
     if (threadIdx.x == 0) res_sum = sum_val;
     __syncthreads();
@@ -83,7 +83,7 @@ __global__ void fused_logp_forward_kernel(
             float target_logit = static_cast<float>(row_logits[target_id]);
             output[row] = static_cast<scalar_t>(target_logit - res_max - logf(res_sum));
         } else {
-            output[row] = static_cast<scalar_t>(0.0f); 
+            output[row] = static_cast<scalar_t>(0.0f);
         }
     }
 }
@@ -94,7 +94,7 @@ torch::Tensor fused_logp_forward(torch::Tensor logits, torch::Tensor token_ids) 
 
     auto logits_contig = logits.contiguous();
     auto token_ids_contig = token_ids.contiguous();
-    
+
     int64_t total_tokens = logits.size(0);
     int64_t vocab_size = logits.size(1);
     auto output = torch::empty({total_tokens}, logits.options());
@@ -102,7 +102,7 @@ torch::Tensor fused_logp_forward(torch::Tensor logits, torch::Tensor token_ids) 
     const int threads = 256;
     const int blocks = total_tokens;
 
-    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, 
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
         logits.scalar_type(), "fused_logp_kernel", ([&] {
         fused_logp_forward_kernel<scalar_t><<<blocks, threads>>>(
             logits_contig.data_ptr<scalar_t>(),

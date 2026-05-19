@@ -1,10 +1,11 @@
-# SPDX-License-Identifier: Apache-2.0  
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Kernel-Align Contributors
 
 import torch
 import torch.nn as nn
 from rl_engine.utils.logger import logger
 from rl_engine.platforms.constants import constants
+
 
 class SamplerBackend(nn.Module):
     def __init__(self):
@@ -22,12 +23,13 @@ class SamplerBackend(nn.Module):
 
     def _init_backend_assets(self):
         """
-        Preload backend-specific dependencies 
+        Preload backend-specific dependencies
         to avoid runtime import overhead.
         """
         if self.backend == constants.BackendLib.FLASHINFER.value:
             try:
                 import flashinfer
+
                 self.flashinfer = flashinfer
                 logger.info("FlashInfer kernels loaded successfully.")
             except ImportError:
@@ -46,10 +48,10 @@ class SamplerBackend(nn.Module):
 
         if self.backend == constants.BackendLib.FLASHINFER.value:
             from flashinfer.sampling import (
-                sampling_from_logits, 
+                sampling_from_logits,
                 top_k_top_p_sampling_from_logits,
                 top_p_sampling_from_probs,
-                top_k_renorm_probs
+                top_k_renorm_probs,
             )
 
             logits = logits.float().contiguous()
@@ -57,21 +59,21 @@ class SamplerBackend(nn.Module):
                 logits.div_(temperature)
             if top_k is None and top_p is None:
                 return sampling_from_logits(logits, deterministic=deterministic)
-            
+
             if top_k is not None and top_p is not None:
                 return top_k_top_p_sampling_from_logits(
                     logits, top_k, top_p, deterministic=deterministic
                 )
-            
+
             if top_p is not None:
                 probs = torch.softmax(logits, dim=-1)
                 return top_p_sampling_from_probs(probs, top_p, deterministic=deterministic)
-            
+
             if top_k is not None:
                 probs = torch.softmax(logits, dim=-1)
                 renorm_probs = top_k_renorm_probs(probs, top_k)
                 return torch.multinomial(renorm_probs, num_samples=1).view(-1)
-            
+
             return sampling_from_logits(logits, deterministic=deterministic)
 
         elif self.backend == constants.BackendLib.AITER.value:
@@ -83,10 +85,9 @@ class SamplerBackend(nn.Module):
         if top_k is not None:
             topk_values, _ = torch.topk(logits, top_k)
             min_topk = topk_values[..., -1, None]
-            logits = torch.where(logits < min_topk, torch.full_like(logits, float('-inf')), logits)
+            logits = torch.where(logits < min_topk, torch.full_like(logits, float("-inf")), logits)
         probs = torch.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
-
 
     @torch.inference_mode()
     def compute_logp(self, logits, token_ids):
@@ -95,18 +96,19 @@ class SamplerBackend(nn.Module):
         """
         batch_size = logits.shape[0]
         out_logp = torch.empty(
-            logits.shape[0], logits.shape[1], 
-            device=logits.device, dtype=logits.dtype
+            logits.shape[0], logits.shape[1], device=logits.device, dtype=logits.dtype
         )
-        
+
         chunk_size = 4096  # Tune this based on GPU memory and performance characteristics
-        
+
         for i in range(0, batch_size, chunk_size):
             c_logits = logits[i : i + chunk_size]
             c_token_ids = token_ids[i : i + chunk_size]
-            
-            out_logp[i : i + chunk_size] = torch.log_softmax(c_logits, dim=-1).gather(
-                -1, c_token_ids.unsqueeze(-1)
-            ).squeeze(-1)
-            
+
+            out_logp[i : i + chunk_size] = (
+                torch.log_softmax(c_logits, dim=-1)
+                .gather(-1, c_token_ids.unsqueeze(-1))
+                .squeeze(-1)
+            )
+
         return out_logp.view(batch_size, -1)

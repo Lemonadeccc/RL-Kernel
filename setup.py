@@ -1,14 +1,15 @@
-# SPDX-License-Identifier: Apache-2.0  
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Kernel-Align Contributors
 
-import os
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
 try:
     from torch.utils.cpp_extension import ROCMExtension
 except ImportError:
     ROCMExtension = None
 import torch
+
 
 def get_extensions():
     extensions = []
@@ -25,11 +26,7 @@ def get_extensions():
                 ],
                 extra_compile_args={
                     "cxx": ["-O3", "-std=c++17"],
-                    "hipcc": [
-                        "-O3", 
-                        "--use_fast_math", 
-                        "-Xhipcc", "-compress-all"
-                    ]
+                    "hipcc": ["-O3", "--use_fast_math", "-Xhipcc", "-compress-all"],
                 },
             )
         )
@@ -43,15 +40,12 @@ def get_extensions():
                 ],
                 extra_compile_args={
                     "cxx": ["-O3", "-std=c++17"],
-                    "nvcc": [
-                        "-O3", 
-                        "--use_fast_math", 
-                        "-Xfatbin", "-compress-all"
-                    ]
+                    "nvcc": ["-O3", "--use_fast_math", "-Xfatbin", "-compress-all"],
                 },
             )
         )
     return extensions
+
 
 setup(
     name="rl-engine",

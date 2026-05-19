@@ -9,6 +9,7 @@ from rl_engine.utils.logger import logger
 from rl_engine.kernels.sampling import SamplerBackend as RL_Sampler
 from rl_engine.platforms.device import device_ctx
 
+
 def native_sampling(logits, top_k=None, top_p=None, temperature=1.0):
     """
     Simulates standard PyTorch sampling logic (Top-K -> Top-P -> Softmax -> Multinomial)
@@ -17,29 +18,30 @@ def native_sampling(logits, top_k=None, top_p=None, temperature=1.0):
         logits = logits / temperature
 
     logits = logits.float()
-    
+
     if top_k is not None:
         v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-        logits[logits < v[:, [-1]]] = float('-inf')
-    
+        logits[logits < v[:, [-1]]] = float("-inf")
+
     if top_p is not None:
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
         cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
         sorted_indices_to_remove = cumulative_probs > top_p
         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
         sorted_indices_to_remove[..., 0] = 0
-        
+
         for i in range(logits.size(0)):
             indices_to_remove = sorted_indices[i][sorted_indices_to_remove[i]]
-            logits[i, indices_to_remove] = float('-inf')
-            
+            logits[i, indices_to_remove] = float("-inf")
+
     probs = torch.softmax(logits, dim=-1)
     return torch.multinomial(probs, num_samples=1)
+
 
 def run_benchmark(args, return_data: bool = False):
     device = device_ctx.device
     dtype = torch.float32
-    
+
     sampler = RL_Sampler().to(device)
     g_sizes = [int(g) for g in args.g_sizes.split(",")]
     results = []
@@ -78,24 +80,22 @@ def run_benchmark(args, return_data: bool = False):
         speedup_str = f"{speedup_val:.2f}x"
 
         if return_data:
-            raw_metrics.append({
-                "g": g,
-                "engine_ms": engine_time,
-                "native_ms": native_time,
-                "speedup": speedup_str
-            })
+            raw_metrics.append(
+                {"g": g, "engine_ms": engine_time, "native_ms": native_time, "speedup": speedup_str}
+            )
 
         results.append([g, f"{native_time:.2f} ms", f"{engine_time:.2f} ms", speedup_str])
-    
+
     if return_data:
         return raw_metrics
 
     headers = ["Batch Size (G)", "Native Latency", "RL-Engine (FlashInfer)", "Speedup"]
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print(f"RL-ENGINE SAMPLING BENCHMARK REPORT (TopK={args.top_k}, TopP={args.top_p})")
-    print("="*80)
+    print("=" * 80)
     print(tabulate(results, headers=headers, tablefmt="fancy_grid"))
-    print("="*80 + "\n")
+    print("=" * 80 + "\n")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

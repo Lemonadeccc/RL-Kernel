@@ -1,14 +1,15 @@
-# SPDX-License-Identifier: Apache-2.0  
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Kernel-Align Contributors
 
 import torch
 import kernel_align_ops
 
+
 class FusedLogp:
     @staticmethod
     def apply(logits: torch.Tensor, token_ids: torch.Tensor):
         """
-        输入: 
+        输入:
             logits: [G*L, V]
             token_ids: [G*L]
         返回:

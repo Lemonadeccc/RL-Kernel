@@ -1,22 +1,25 @@
-# SPDX-License-Identifier: Apache-2.0  
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Kernel-Align Contributors
 
 from enum import Enum
 
+
 class DeviceType(Enum):
-    CUDA = "cuda"        # NVIDIA GPU
-    ROCM = "rocm"        # AMD GPU
-    NPU = "npu"          # Huawei Ascend
-    TPU = "tpu"          # Google TPU
-    XPU = "xpu"          # Intel GPU
+    CUDA = "cuda"  # NVIDIA GPU
+    ROCM = "rocm"  # AMD GPU
+    NPU = "npu"  # Huawei Ascend
+    TPU = "tpu"  # Google TPU
+    XPU = "xpu"  # Intel GPU
     CPU = "cpu"
+
 
 class BackendLib(Enum):
     FLASHINFER = "flashinfer"
     AITER = "aiter"
     TRITON = "triton"
-    CANN = "cann"         # Huawei NPU
-    NATIVE = "native"     # PyTorch Default
+    CANN = "cann"  # Huawei NPU
+    NATIVE = "native"  # PyTorch Default
+
 
 class PrecisionType(Enum):
     FP32 = "float32"
@@ -25,6 +28,7 @@ class PrecisionType(Enum):
     INT8 = "int8"
     INT4 = "int4"
 
+
 class SamplingMethod(Enum):
     TOP_K = "top_k"
     TOP_P = "top_p"
@@ -32,20 +36,25 @@ class SamplingMethod(Enum):
     GREEDY = "greedy"
     TEMPERATURE = "temperature"
     NUCLEUS = "nucleus"
+
+
 class MemoryFormat(Enum):
     CONTIGUOUS = "contiguous"
     CHANNELS_LAST = "channels_last"
     PRESERVE = "preserve"
 
+
 class OperatorFusionLevel(Enum):
     NONE = "none"
     PARTIAL = "partial"
-    FULL = "full"   
+    FULL = "full"
+
 
 class KernelOptimizationLevel(Enum):
     DEFAULT = "default"
     AGGRESSIVE = "aggressive"
     CUSTOM = "custom"
+
 
 class LoggingLevel(Enum):
     DEBUG = "debug"
@@ -54,11 +63,13 @@ class LoggingLevel(Enum):
     ERROR = "error"
     CRITICAL = "critical"
 
+
 class ProfilingMode(Enum):
     OFF = "off"
     BASIC = "basic"
     DETAILED = "detailed"
     CUSTOM = "custom"
+
 
 class DistributedStrategy(Enum):
     DATA_PARALLEL = "data_parallel"
@@ -66,11 +77,13 @@ class DistributedStrategy(Enum):
     PIPELINE_PARALLEL = "pipeline_parallel"
     HYBRID = "hybrid"
 
+
 class CheckpointFormat(Enum):
     PT = "pt"
     ONNX = "onnx"
     TORCHSCRIPT = "torchscript"
-    CUSTOM = "custom"   
+    CUSTOM = "custom"
+
 
 class ActivationFunction(Enum):
     RELU = "relu"
@@ -78,6 +91,7 @@ class ActivationFunction(Enum):
     SILU = "silu"
     TANH = "tanh"
     SIGMOID = "sigmoid"
+
 
 class Constants:
     def __init__(self):
@@ -93,5 +107,6 @@ class Constants:
         self.DistributedStrategy = DistributedStrategy
         self.CheckpointFormat = CheckpointFormat
         self.ActivationFunction = ActivationFunction
+
 
 constants = Constants()
