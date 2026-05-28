@@ -17,7 +17,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const candidateReviewers = ['Flink-ddd', 'EthanZero2Hero', 'inaniloquentee', 'Schatten'];
+            const candidateReviewers = ['Flink-ddd', 'EthanZero2Hero', 'inaniloquentee', 'bitborne'];
 
             const prAuthor = context.payload.pull_request.user.login;
 
