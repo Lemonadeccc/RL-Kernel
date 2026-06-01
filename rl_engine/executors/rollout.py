@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 RL-Kernel Contributors
 
-from typing import Any, Dict, Mapping, Optional, Sequence
+from __future__ import annotations
 
 import torch
+from typing import Any, Mapping, Optional, Sequence
 
-from rl_engine.executors.bridge import IPCWeightBridge
+from rl_engine.executors.bridge import (
+    WeightBridgeUnavailableError,
+    WeightConsumer,
+    WeightInstallAdapter,
+    WeightUpdateManifest,
+    make_weight_bridge,
+)
 from rl_engine.executors.vllm_sampler import VLLMSamplerConfig, VLLMSharedPrefixSampler
 from rl_engine.kernels.registry import kernel_registry
 from rl_engine.utils.logger import logger
@@ -17,26 +24,98 @@ class RolloutExecutor:
     Manages shared weights and dispatches hardware-specific kernels for large-scale sampling.
     """
 
-    def __init__(self, model_config: Optional[dict] = None):
+    def __init__(
+        self,
+        model_config: Optional[dict] = None,
+        *,
+        weight_bridge: Optional[WeightConsumer] = None,
+        weight_transport: Optional[str] = None,
+        weight_install_adapter: Optional[WeightInstallAdapter] = None,
+    ):
         self.config = model_config or {}
-        self.bridge = IPCWeightBridge()  # Integrates Zero-Copy bridge.
-        self.shared_weights: Dict[str, torch.Tensor] = {}
+        transport = weight_transport or str(self.config.get("weight_transport", "cuda-vmm"))
+        self.bridge = weight_bridge or make_weight_bridge(transport)
+        self.shared_weights: dict[str, torch.Tensor] = {}
+        self.weight_install_adapter = weight_install_adapter
+        self.active_weight_version: Optional[int] = None
+        self.active_weight_update_id: Optional[str] = None
         self.logp_op = None
         self.attn_op = None
         self.sampler_config: Optional[VLLMSamplerConfig] = None
         self.sampler: Optional[VLLMSharedPrefixSampler] = None
 
-        logger.info("Initializing Zero-Copy enabled RolloutExecutor...")
+        logger.info("Initializing RolloutExecutor with weight transport %s", transport)
 
-    def update_weights_via_ipc(self, ipc_handles: Dict[str, Any]):
+    def update_weights(self, manifest: WeightUpdateManifest) -> Mapping[str, torch.Tensor]:
         """
-        Sync weights from training process via IPC handles.
-        Enables Zero-Copy by directly mapping training VRAM to the inference process.
+        Import a complete published weight manifest and switch active version.
+
+        The underlying bridge owns transport-specific semantics. Same-node CPU
+        shared-memory imports return aliases to the published shared segment;
+        CUDA VMM imports return aliases to the published GPU allocation. Legacy
+        CUDA IPC remains capability-gated until its lifecycle is validated.
         """
-        logger.info("Syncing weights from Training process (Zero-Copy)...")
-        self.shared_weights = self.bridge.import_model_weights(ipc_handles)
-        # Weights can be further loaded into vLLM sampler.
-        logger.info(f"Successfully mapped {len(self.shared_weights)} parameters via IPC.")
+        logger.info(
+            "Importing weight update %s version=%s transport=%s",
+            manifest.update_id,
+            manifest.weight_version,
+            manifest.transport,
+        )
+        previous_update_id = self.active_weight_update_id
+        try:
+            imported = dict(self.bridge.import_update(manifest))
+            if self.weight_install_adapter is not None:
+                self.weight_install_adapter.install(manifest, imported)
+            self.bridge.acknowledge(manifest.update_id)
+        except Exception as exc:
+            try:
+                self.bridge.reject(manifest.update_id, f"rollout weight install failed: {exc}")
+            except Exception:
+                logger.exception("Failed to reject weight update %s", manifest.update_id)
+            raise
+        self.shared_weights = imported
+        self.active_weight_version = manifest.weight_version
+        self.active_weight_update_id = manifest.update_id
+        if previous_update_id is not None and previous_update_id != manifest.update_id:
+            self.release_weight_update(previous_update_id)
+        logger.info("Activated %s imported weight tensors.", len(self.shared_weights))
+        return self.shared_weights
+
+    def release_weights(self) -> None:
+        """Release the active weight update held by this rollout worker."""
+        if self.active_weight_update_id is None:
+            return
+        update_id = self.active_weight_update_id
+        if self.weight_install_adapter is not None:
+            self.weight_install_adapter.release(update_id)
+        self.bridge.release(update_id)
+        self.shared_weights = {}
+        self.active_weight_update_id = None
+
+    def release_weight_update(self, update_id: str) -> None:
+        """Release a specific manifest update, active or already superseded."""
+        if self.weight_install_adapter is not None:
+            self.weight_install_adapter.release(update_id)
+        self.bridge.release(update_id)
+        if self.active_weight_update_id == update_id:
+            self.shared_weights = {}
+            self.active_weight_update_id = None
+
+    def update_weights_via_ipc(self, ipc_handles: Mapping[str, Any]) -> Mapping[str, torch.Tensor]:
+        """
+        Backward-compatible IPC entry point.
+
+        Raw CUDA IPC handle imports are intentionally unavailable until issue
+        #13 validates CUDA IPC snapshot visibility and handle lifetime in a real
+        target runtime. New callers should pass a `WeightUpdateManifest` to
+        `update_weights(...)` instead.
+        """
+        del ipc_handles
+        raise WeightBridgeUnavailableError(
+            "Raw CUDA IPC handle imports are not production-ready. Publish a "
+            "WeightUpdateManifest and call update_weights(...) so the bridge can "
+            "validate version, tensor metadata, acknowledgement, and release lifecycle."
+        )
 
     def _prepare_kernels(self):
         """
@@ -78,7 +157,7 @@ class RolloutExecutor:
         *,
         num_generations: Optional[int] = None,
         sampling_params: Optional[Mapping[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Generate GRPO rollout candidates through vLLM with shared prefix caching.
         """

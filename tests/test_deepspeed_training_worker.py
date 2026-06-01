@@ -10,6 +10,10 @@ import time
 
 import pytest
 
+from rl_engine.executors.bridge import (
+    LocalTensorCopyBridge,
+    WeightBridgeUnavailableError,
+)
 from rl_engine.executors.training_contract import RolloutStageResult
 
 
@@ -178,3 +182,80 @@ def test_deepspeed_training_worker_synthetic_fallback(monkeypatch):
     assert result.published_weight_version == 5
     assert result.metrics["training_backend"] == "deepspeed"
     assert result.metrics["training_data_source"] == "synthetic_fallback"
+
+
+def test_deepspeed_worker_publishes_full_state_manifest(monkeypatch):
+    _install_fake_deepspeed(monkeypatch)
+    from rl_engine.executors.deepspeed_trainer import (
+        DeepSpeedTrainingConfig,
+        DeepSpeedTrainingWorker,
+    )
+
+    bridge = LocalTensorCopyBridge(source_worker="training", source_rank=0)
+    worker = DeepSpeedTrainingWorker(
+        DeepSpeedTrainingConfig(
+            vocab_size=16,
+            hidden_dim=8,
+            zero_stage=2,
+            seed=17,
+        ),
+        weight_bridge=bridge,
+    )
+
+    manifest = worker.publish_weights(
+        weight_version=21,
+        metadata={"iteration": 4},
+    )
+    imported = bridge.import_update(manifest)
+
+    assert manifest.source_worker == "training"
+    assert manifest.weight_version == 21
+    assert manifest.metadata["iteration"] == 4
+    assert manifest.metadata["layout"]["kind"] == "full-state"
+    assert manifest.metadata["layout"]["zero_stage"] == 2
+    assert manifest.metadata["layout"]["world_size"] == 1
+    assert manifest.metadata["layout"]["rank"] == 0
+    assert set(imported) == set(worker.model.state_dict())
+
+    bridge.release(manifest.update_id)
+
+
+def test_deepspeed_zero3_publish_requires_all_gather(monkeypatch):
+    _install_fake_deepspeed(monkeypatch)
+    from rl_engine.executors.deepspeed_trainer import (
+        DeepSpeedTrainingConfig,
+        DeepSpeedTrainingWorker,
+    )
+
+    worker = DeepSpeedTrainingWorker(
+        DeepSpeedTrainingConfig(
+            vocab_size=16,
+            hidden_dim=8,
+            zero_stage=3,
+        )
+    )
+
+    with pytest.raises(WeightBridgeUnavailableError, match="ZeRO-3"):
+        worker.publish_weights(weight_version=1)
+
+
+def test_deepspeed_published_versions_are_monotonic(monkeypatch):
+    _install_fake_deepspeed(monkeypatch)
+    from rl_engine.executors.deepspeed_trainer import (
+        DeepSpeedTrainingConfig,
+        DeepSpeedTrainingWorker,
+    )
+
+    worker = DeepSpeedTrainingWorker(
+        DeepSpeedTrainingConfig(
+            vocab_size=16,
+            hidden_dim=8,
+            seed=23,
+        )
+    )
+
+    first = worker.train(_rollout(iteration=0, weight_version=5))
+    second = worker.train(_rollout(iteration=1, weight_version=5))
+
+    assert first.published_weight_version == 6
+    assert second.published_weight_version == 7

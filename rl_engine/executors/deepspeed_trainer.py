@@ -10,6 +10,12 @@ from typing import Any, Mapping, Optional
 
 import torch
 
+from rl_engine.executors.bridge import (
+    WeightBridgeUnavailableError,
+    WeightPublisher,
+    WeightUpdateManifest,
+    make_weight_bridge,
+)
 from rl_engine.executors.training_contract import (
     RolloutBatchMixin,
     RolloutStageResult,
@@ -51,11 +57,23 @@ class DeepSpeedTrainingWorker(RolloutBatchMixin):
 
     config: DeepSpeedTrainingConfig
 
-    def __init__(self, config: Optional[DeepSpeedTrainingConfig] = None):
+    def __init__(
+        self,
+        config: Optional[DeepSpeedTrainingConfig] = None,
+        *,
+        weight_bridge: Optional[WeightPublisher] = None,
+        weight_transport: str = "local-clone",
+    ):
         self.config = config or DeepSpeedTrainingConfig()
         self.device = torch.device(self.config.device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA training requested but torch.cuda.is_available() is false")
+        self.weight_bridge = weight_bridge or make_weight_bridge(
+            weight_transport,
+            source_worker="deepspeed-training",
+            source_rank=0,
+        )
+        self._latest_published_weight_version = -1
 
         deepspeed = _load_deepspeed()
         torch.manual_seed(self.config.seed)
@@ -108,7 +126,7 @@ class DeepSpeedTrainingWorker(RolloutBatchMixin):
         self.engine.step()
 
         finished_at = time.perf_counter()
-        published = rollout.weight_version + 1
+        published = self._next_published_weight_version(rollout.weight_version)
         return TrainingStageResult(
             iteration=rollout.iteration,
             consumed_weight_version=rollout.weight_version,
@@ -126,6 +144,51 @@ class DeepSpeedTrainingWorker(RolloutBatchMixin):
             started_at=started_at,
             finished_at=finished_at,
         )
+
+    def publish_weights(
+        self,
+        *,
+        weight_version: int,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> WeightUpdateManifest:
+        """
+        Publish the current DeepSpeed model state as a complete weight manifest.
+
+        ZeRO-3 partitions parameters across ranks, so a production publication
+        must all-gather a full state first. Until that path exists, the worker
+        fails explicitly instead of publishing an incomplete shard.
+        """
+        if self.config.zero_stage >= 3:
+            raise WeightBridgeUnavailableError(
+                "DeepSpeed ZeRO-3 publish requires a real all-gather/full-state "
+                "export before rollout workers can consume the weight manifest."
+            )
+
+        manifest_metadata = dict(metadata or {})
+        layout = {
+            "kind": "full-state",
+            "zero_stage": self.config.zero_stage,
+            "world_size": 1,
+            "rank": 0,
+        }
+        layout.update(dict(manifest_metadata.get("layout", {})))
+        manifest_metadata["layout"] = layout
+        return self.weight_bridge.publish(
+            self.model,
+            weight_version=weight_version,
+            metadata=manifest_metadata,
+        )
+
+    def release_weights(self, update_id: str) -> None:
+        self.weight_bridge.release(update_id)
+
+    def _next_published_weight_version(self, consumed_weight_version: int) -> int:
+        published = max(
+            int(consumed_weight_version) + 1,
+            self._latest_published_weight_version + 1,
+        )
+        self._latest_published_weight_version = published
+        return published
 
     def _resolved_deepspeed_config(self) -> dict[str, Any]:
         batch_size = max(1, self.config.num_prompts * self.config.samples_per_prompt)

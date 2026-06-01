@@ -10,8 +10,13 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 import pytest
+import torch
 
-from rl_engine.executors.training_contract import RolloutStageResult, TrainingStageResult
+from rl_engine.executors.bridge import SharedMemoryTensorBridge
+from rl_engine.executors.training_contract import (
+    RolloutStageResult,
+    TrainingStageResult,
+)
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,53 @@ class FakeTrainingWorker:
             started_at=started,
             finished_at=time.perf_counter(),
         )
+
+
+class FakeWeightPublishingWorker:
+    def __init__(self):
+        self.model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.LayerNorm(2))
+        with torch.no_grad():
+            for index, tensor in enumerate(self.model.parameters()):
+                tensor.fill_(index + 1)
+        self.bridge = SharedMemoryTensorBridge(source_worker="ray-training", source_rank=0)
+        self.released_updates = []
+
+    def publish_weights(self, *, weight_version, metadata=None):
+        return self.bridge.publish(
+            self.model,
+            weight_version=weight_version,
+            metadata=metadata,
+        )
+
+    def release_weights(self, update_id):
+        self.released_updates.append(update_id)
+        self.bridge.release(update_id)
+
+
+class FakeWeightConsumingWorker:
+    def __init__(self):
+        self.bridge = SharedMemoryTensorBridge(source_worker="ray-rollout", source_rank=1)
+        self.active_manifest_id = None
+        self.active_weight_names = []
+        self.released = False
+
+    def update_weights(self, manifest):
+        tensors = self.bridge.import_update(manifest)
+        self.bridge.acknowledge(manifest.update_id)
+        self.active_manifest_id = manifest.update_id
+        self.active_weight_names = sorted(tensors)
+        return {
+            "active_weight_version": self.bridge.active_weight_version,
+            "update_id": manifest.update_id,
+            "tensor_count": len(tensors),
+            "weight_names": self.active_weight_names,
+        }
+
+    def release_weights(self):
+        if self.active_manifest_id is not None:
+            self.bridge.release(self.active_manifest_id)
+        self.released = True
+        return {"released": True, "update_id": self.active_manifest_id}
 
 
 def test_importing_module_does_not_import_ray(monkeypatch):
@@ -256,3 +308,42 @@ def test_ray_actor_handles_support_direct_rollout_training_handoff():
 
     manager.shutdown()
     assert [actor for actor, _ in fake_ray.kill_calls] == list(reversed(fake_ray.actors))
+
+
+def test_ray_actor_handles_forward_weight_manifest_between_workers():
+    from rl_engine.executors.ray_actor_manager import (
+        RayActorManager,
+        RayRuntimeConfig,
+        RayWorkerSpec,
+    )
+
+    fake_ray = FakeRayModule()
+    manager = RayActorManager(
+        RayRuntimeConfig(auto_init=True),
+        ray_module=fake_ray,
+    )
+    training = manager.create_training_worker(RayWorkerSpec(FakeWeightPublishingWorker))
+    rollout = manager.create_rollout_worker(RayWorkerSpec(FakeWeightConsumingWorker))
+
+    manifest = training.publish_weights(
+        weight_version=11,
+        metadata={"iteration": 3},
+    )
+    update_result = rollout.update_weights(manifest)
+    release_result = rollout.release_weights()
+    training.release_weights(manifest.update_id)
+
+    assert manifest.source_worker == "ray-training"
+    assert manifest.weight_version == 11
+    assert manifest.metadata["iteration"] == 3
+    assert update_result == {
+        "active_weight_version": 11,
+        "update_id": manifest.update_id,
+        "tensor_count": manifest.tensor_count,
+        "weight_names": sorted(manifest.tensors),
+    }
+    assert release_result == {"released": True, "update_id": manifest.update_id}
+    assert len(fake_ray.actors) == 2
+    assert len(fake_ray.get_calls) == 4
+
+    manager.shutdown()

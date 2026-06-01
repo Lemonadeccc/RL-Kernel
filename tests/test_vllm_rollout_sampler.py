@@ -4,7 +4,14 @@
 import importlib
 
 import pytest
+import torch
 
+from rl_engine.executors.bridge import (
+    CUDAVMMTensorBridge,
+    SharedMemoryTensorBridge,
+    VLLMWeightInstallAdapter,
+    WeightBridgeUnavailableError,
+)
 from rl_engine.executors.rollout import RolloutExecutor
 from rl_engine.executors.vllm_sampler import (
     VLLMSamplerConfig,
@@ -278,3 +285,99 @@ def test_rollout_executor_defers_vllm_sampler_config_validation():
     assert executor.sampler_config is None
     with pytest.raises(ValueError, match="Unsupported rollout sampler backend"):
         executor.generate_candidates(["prompt-a"])
+
+
+def test_rollout_executor_defaults_to_cuda_vmm_manifest_bridge():
+    executor = RolloutExecutor()
+
+    assert isinstance(executor.bridge, CUDAVMMTensorBridge)
+
+
+def test_rollout_executor_updates_weights_from_manifest():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.LayerNorm(2))
+    with torch.no_grad():
+        for index, tensor in enumerate(model.parameters()):
+            tensor.fill_(index + 1)
+
+    publisher = SharedMemoryTensorBridge(source_worker="trainer", source_rank=0)
+    manifest = publisher.publish(model, weight_version=3)
+    rollout_bridge = SharedMemoryTensorBridge(source_worker="rollout", source_rank=1)
+    executor = RolloutExecutor(weight_bridge=rollout_bridge)
+
+    weights = executor.update_weights(manifest)
+
+    assert executor.active_weight_version == 3
+    assert executor.active_weight_update_id == manifest.update_id
+    assert set(weights) == set(model.state_dict())
+    assert rollout_bridge.update_status(manifest.update_id) == "acknowledged"
+    for name, tensor in model.state_dict().items():
+        assert torch.equal(weights[name], tensor)
+
+    executor.release_weights()
+    assert executor.shared_weights == {}
+    assert executor.active_weight_update_id is None
+
+    publisher.release(manifest.update_id)
+
+
+def test_rollout_executor_installs_weights_before_acknowledging():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.LayerNorm(2))
+    publisher = SharedMemoryTensorBridge(source_worker="trainer", source_rank=0)
+    manifest = publisher.publish(model, weight_version=4)
+    rollout_bridge = SharedMemoryTensorBridge(source_worker="rollout", source_rank=1)
+    install_calls = []
+    adapter = VLLMWeightInstallAdapter(
+        object(),
+        install_callable=lambda incoming_manifest, incoming_tensors: install_calls.append(
+            (incoming_manifest.update_id, set(incoming_tensors))
+        ),
+    )
+    executor = RolloutExecutor(
+        weight_bridge=rollout_bridge,
+        weight_install_adapter=adapter,
+    )
+
+    executor.update_weights(manifest)
+
+    assert install_calls == [(manifest.update_id, set(manifest.tensors))]
+    assert adapter.active_weight_version == 4
+    assert rollout_bridge.update_status(manifest.update_id) == "acknowledged"
+
+    executor.release_weights()
+    publisher.release(manifest.update_id)
+
+
+def test_rollout_executor_rejects_update_when_weight_install_fails():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.LayerNorm(2))
+    publisher = SharedMemoryTensorBridge(source_worker="trainer", source_rank=0)
+    first = publisher.publish(model, weight_version=1)
+    second = publisher.publish(model, weight_version=2)
+    rollout_bridge = SharedMemoryTensorBridge(source_worker="rollout", source_rank=1)
+    executor = RolloutExecutor(weight_bridge=rollout_bridge)
+    executor.update_weights(first)
+
+    adapter = VLLMWeightInstallAdapter(
+        object(),
+        install_callable=lambda _manifest, _tensors: (_ for _ in ()).throw(
+            RuntimeError("install failed")
+        ),
+    )
+    executor.weight_install_adapter = adapter
+
+    with pytest.raises(RuntimeError, match="install failed"):
+        executor.update_weights(second)
+
+    assert executor.active_weight_version == 1
+    assert executor.active_weight_update_id == first.update_id
+    assert rollout_bridge.update_status(second.update_id) == "rejected"
+
+    executor.release_weights()
+    publisher.release(first.update_id)
+    publisher.release(second.update_id)
+
+
+def test_rollout_executor_legacy_ipc_entry_is_explicitly_blocked():
+    executor = RolloutExecutor({"weight_transport": "shared-memory"})
+
+    with pytest.raises(WeightBridgeUnavailableError, match="WeightUpdateManifest"):
+        executor.update_weights_via_ipc({"weight": object()})
