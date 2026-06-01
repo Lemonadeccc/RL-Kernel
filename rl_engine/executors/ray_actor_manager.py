@@ -7,6 +7,8 @@ import importlib
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
+from rl_engine.executors.bridge import WeightUpdateManifest
+
 
 class RayUnavailableError(RuntimeError):
     """Raised when the optional Ray runtime cannot be imported."""
@@ -143,6 +145,12 @@ class RayRolloutWorkerHandle:
     def rollout(self, spec: Any) -> Any:
         return self._ray.get(self.actor.rollout.remote(spec))
 
+    def update_weights(self, manifest: WeightUpdateManifest) -> Any:
+        return self._ray.get(self.actor.update_weights.remote(manifest))
+
+    def release_weights(self) -> Any:
+        return self._ray.get(self.actor.release_weights.remote())
+
 
 class RayTrainingWorkerHandle:
     """Synchronous `TrainingWorker` protocol adapter for a Ray actor."""
@@ -153,6 +161,22 @@ class RayTrainingWorkerHandle:
 
     def train(self, rollout: Any) -> Any:
         return self._ray.get(self.actor.train.remote(rollout))
+
+    def publish_weights(
+        self,
+        *,
+        weight_version: int,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> WeightUpdateManifest:
+        return self._ray.get(
+            self.actor.publish_weights.remote(
+                weight_version=weight_version,
+                metadata=metadata,
+            )
+        )
+
+    def release_weights(self, update_id: str) -> Any:
+        return self._ray.get(self.actor.release_weights.remote(update_id))
 
 
 class _RayWorkerActor:
@@ -171,6 +195,25 @@ class _RayWorkerActor:
 
     def train(self, rollout: Any) -> Any:
         return self.worker.train(rollout)
+
+    def update_weights(self, manifest: WeightUpdateManifest) -> Any:
+        return self.worker.update_weights(manifest)
+
+    def publish_weights(
+        self,
+        *,
+        weight_version: int,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> WeightUpdateManifest:
+        return self.worker.publish_weights(
+            weight_version=weight_version,
+            metadata=metadata,
+        )
+
+    def release_weights(self, update_id: Optional[str] = None) -> Any:
+        if update_id is None:
+            return self.worker.release_weights()
+        return self.worker.release_weights(update_id)
 
     def health_check(self) -> Mapping[str, Any]:
         return {
