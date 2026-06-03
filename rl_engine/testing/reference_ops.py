@@ -134,3 +134,31 @@ def summarize_kernel_drift(
         "mean_abs_error": mean_abs,
         "active_count": active_count,
     }
+
+
+def rms_norm_reference(
+        x: torch.Tensor, 
+        weight: torch.Tensor, 
+        eps: float = 1e-6,
+        output_dtype: torch.dtype | None = None
+        ) -> torch.Tensor:
+    """
+    Reference RMSNorm for fused-kernel validation.
+    """
+    if eps <= 0.0:
+        raise ValueError("eps must be greater than zero")
+    if weight.shape != x.shape[-1:]:
+        raise ValueError(f"weight shape {tuple(weight.shape)} must match the last dim of x"
+                         f"{tuple(x.shape[-1:])}"
+                         )
+    out_dtype = output_dtype or x.dtype
+    compute_dtype = torch.promote_types(x.dtype, torch.float32)
+
+    x_c = x.to(compute_dtype)
+    variance = x_c.pow(2).mean(dim=-1, keepdim=True)
+    normed = x_c * torch.rsqrt(variance + eps)
+    out = normed * weight.to(compute_dtype)
+    return out.to(out_dtype)
+
+
+

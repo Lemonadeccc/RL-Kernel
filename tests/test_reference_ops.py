@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from rl_engine.testing import (
     active_token_count,
@@ -10,6 +11,7 @@ from rl_engine.testing import (
     compute_reference_kl,
     masked_mean,
     masked_sum,
+    rms_norm_reference,
     selected_logprobs_reference,
     summarize_kernel_drift,
 )
@@ -84,3 +86,63 @@ def test_ratio_kl_and_drift_helpers():
     assert summary["active_count"] == 3
     assert summary["max_abs_error"] == pytest.approx(0.1, rel=1e-6)
     assert summary["mean_abs_error"] == pytest.approx(0.1, rel=1e-6)
+
+
+def test_rms_norm_reference_match_pytorch():
+    torch.manual_seed(0)
+    d = 16
+    x = torch.randn(4, 7, d)
+    weight = torch.randn(d)
+    eps = 1e-5
+
+    actual = rms_norm_reference(x, weight, eps)
+    expected = F.rms_norm(x, (d,), weight, eps)
+
+    assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-5)
+    assert actual.dtype == torch.float32
+
+
+def test_rms_norm_reference_fp32_accumulation():
+    torch.manual_seed(0)
+    d = 16
+    x = torch.randn(3, d)
+    weight = torch.randn(d)
+    eps = 1e-5
+
+    for dtype in (torch.float16, torch.bfloat16):
+        x_low, weight_low = x.to(dtype), weight.to(dtype)
+        actual = rms_norm_reference(x_low, weight_low, eps)
+        # Computing in fp32 then casting back must match the low-precision path.
+        expected = rms_norm_reference(x_low.float(), weight_low.float(), eps).to(dtype)
+
+        assert actual.dtype == dtype
+        assert torch.equal(actual, expected)
+
+
+def test_rms_norm_reference_output_dtype():
+    x = torch.randn(2, 8)
+    weight = torch.randn(8)
+
+    actual = rms_norm_reference(x, weight, eps=1e-5, output_dtype=torch.float16)
+
+    assert actual.dtype == torch.float16
+
+
+def test_rms_norm_reference_gradcheck():
+    torch.manual_seed(0)
+    d = 8
+    x = torch.randn(3, d, dtype=torch.float64, requires_grad=True)
+    weight = torch.randn(d, dtype=torch.float64, requires_grad=True)
+
+    assert torch.autograd.gradcheck(lambda a, b: rms_norm_reference(a, b, 1e-5), (x, weight))
+
+
+def test_rms_norm_reference_rejects_bad_input():
+    x = torch.randn(2, 8)
+    weight = torch.randn(8)
+
+    with pytest.raises(ValueError, match="eps"):
+        rms_norm_reference(x, weight, eps=0.0)
+
+    with pytest.raises(ValueError, match="weight"):
+        rms_norm_reference(x, torch.randn(9), eps=1e-5)
