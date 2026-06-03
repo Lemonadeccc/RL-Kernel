@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 Kernel-Align Contributors
+# Copyright (c) 2026 RL-Kernel Contributors
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ class SyntheticRLKernelBatch:
         expected_shape = (self.batch_size, self.completion_len)
         if tuple(values.shape[:2]) != expected_shape:
             raise ValueError(
-                "expected leading shape " f"{expected_shape}, got {tuple(values.shape[:2])}"
+                f"expected leading shape {expected_shape}, got {tuple(values.shape[:2])}"
             )
         return values
 
@@ -138,11 +138,7 @@ def make_synthetic_rl_kernel_batch(
         shared_prompt_ids = prompt_ids.repeat_interleave(samples_per_prompt, dim=0)
         input_ids[:, :prompt_len] = shared_prompt_ids
 
-    attention_mask = torch.ones(
-        (batch_size, total_seq_len),
-        device=target_device,
-        dtype=torch.bool,
-    )
+    attention_mask = torch.ones((batch_size, total_seq_len), device=target_device, dtype=torch.bool)
     prompt_mask = torch.zeros_like(attention_mask)
     if prompt_len:
         prompt_mask[:, :prompt_len] = True

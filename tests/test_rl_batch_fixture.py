@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 Kernel-Align Contributors
+# Copyright (c) 2026 RL-Kernel Contributors
 
 import pytest
 import torch
@@ -102,10 +102,7 @@ def test_compact_completion_values_follow_valid_indices():
     expected = values.reshape(-1)[batch.flat_completion_mask]
 
     assert torch.equal(compact, expected)
-    assert torch.equal(
-        batch.compact_token_ids(),
-        batch.flat_token_ids[batch.flat_completion_mask],
-    )
+    assert torch.equal(batch.compact_token_ids(), batch.flat_token_ids[batch.flat_completion_mask])
     assert torch.equal(
         batch.valid_indices, batch.flat_completion_mask.nonzero(as_tuple=False).squeeze(-1)
     )
