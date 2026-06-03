@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 RL-Kernel Contributors
+# Copyright (c) 2026 Kernel-Align Contributors
 
 from __future__ import annotations
 
@@ -51,7 +51,8 @@ def masked_sum(values: torch.Tensor, mask: torch.Tensor | None = None) -> torch.
 
 
 def active_token_count(
-    mask: torch.Tensor | None, values: torch.Tensor | None = None
+    mask: torch.Tensor | None,
+    values: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return the number of active tokens as an fp32 scalar tensor."""
 
