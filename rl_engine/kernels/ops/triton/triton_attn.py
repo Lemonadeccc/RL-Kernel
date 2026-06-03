@@ -18,7 +18,7 @@ def _fwd_kernel(
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
     
-    # 初始化偏移量
+    # Initialize offsets
     qvk_offset = off_hz * stride_qh
     Q_block_ptr = tl.make_block_ptr(
         base=Q + qvk_offset,
@@ -48,21 +48,19 @@ def _fwd_kernel(
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
     
-    # 初始化统计量
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
     
-    # 加载 Q
     q = tl.load(Q_block_ptr)
     
-    # 确定 K 和 V 的循环范围
+    # Determine loop bounds for K and V
     lo = 0
     hi = (start_m + 1) * BLOCK_M if IS_CAUSAL else N_CTX
     
     for start_n in range(lo, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
-        # 计算 QK^T
+        # Calculate QK^T
         k = tl.load(K_block_ptr)
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)
@@ -72,14 +70,14 @@ def _fwd_kernel(
         if IS_CAUSAL:
             qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
             
-        # 计算 softmax 的 max 和 sum
+        #  softmax max sum
         m_ij = tl.max(qk, 1)
         m_i_new = tl.maximum(m_i, m_ij)
         alpha = tl.exp(m_i - m_i_new)
         beta = tl.exp(qk - m_i_new[:, None])
         l_i_new = alpha * l_i + tl.sum(beta, 1)
         
-        # 更新 scale 和 V 的累加
+        # update scale V
         p_scale = beta / l_i_new[:, None]
         acc_scale = l_i / l_i_new * alpha
         
@@ -88,15 +86,12 @@ def _fwd_kernel(
         p = p_scale.to(v.dtype)
         acc += tl.dot(p, v)
         
-        # 更新统计量
         l_i = l_i_new
         m_i = m_i_new
         
-        # 移动指针到下一个 block
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
 
-    # 写入输出
     O_block_ptr = tl.make_block_ptr(
         base=Out + qvk_offset,
         shape=(N_CTX, BLOCK_DMODEL),
@@ -108,7 +103,6 @@ def _fwd_kernel(
     acc = acc.to(Out.dtype.element_ty)
     tl.store(O_block_ptr, acc)
     
-    # 保存 l 和 m 用于反向传播
     off_zh = off_hz * N_CTX
     l_ptrs = L + off_zh + offs_m
     m_ptrs = M + off_zh + offs_m
@@ -131,7 +125,6 @@ def _bwd_preprocess(
     o_offset = off_hz * stride_oh
     do_offset = off_hz * stride_doh
     
-    # 加载 Out 和 dOut
     O_block_ptr = tl.make_block_ptr(
         base=Out + o_offset,
         shape=(N_CTX, D_HEAD),
@@ -152,10 +145,8 @@ def _bwd_preprocess(
     o = tl.load(O_block_ptr)
     do = tl.load(DO_block_ptr).to(o.dtype)
     
-    # 计算 Delta: row sum of (Out * dOut)
     delta = tl.sum(o * do, axis=1)
     
-    # 存储 Delta
     off_zh = off_hz * N_CTX
     tl.store(Delta + off_zh + off_m, delta)
 
@@ -177,7 +168,6 @@ def _bwd_kernel(
     start_n = tl.program_id(0)
     off_hz = tl.program_id(1)
     
-    # 偏移量计算
     qvk_offset = off_hz * stride_qh
     
     K_block_ptr = tl.make_block_ptr(
@@ -197,7 +187,6 @@ def _bwd_kernel(
         order=(1, 0)
     )
     
-    # 初始化 dK 和 dV 累加器 (fp32高精度累加)
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
     
@@ -224,7 +213,6 @@ def _bwd_kernel(
         order=(1, 0)
     )
     
-    # 用于原子加的地址偏移量
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
     
@@ -235,13 +223,11 @@ def _bwd_kernel(
         q = tl.load(Q_block_ptr)
         do = tl.load(DO_block_ptr)
         
-        # 加载前向统计量
         off_zh = off_hz * N_CTX
         m_i = tl.load(M + off_zh + offs_m)
         l_i = tl.load(L + off_zh + offs_m)
         delta = tl.load(Delta + off_zh + offs_m)
         
-        # 计算 QK^T
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, tl.trans(k))
         qk *= sm_scale
@@ -251,35 +237,24 @@ def _bwd_kernel(
             
         p = tl.exp(qk - m_i[:, None]) / l_i[:, None]
         
-        # 计算 dV = P^T * dO
         dv += tl.dot(tl.trans(p.to(do.dtype)), do)
         
-        # 计算 dP = dO * V^T
         dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         dp += tl.dot(do, tl.trans(v))
         
-        # 计算 dS = P * (dP - Delta)
         ds = p * (dp - delta[:, None]) * sm_scale
         
-        # =======================================================
-        # 核心修复区：计算 dQ 并使用 atomic_add 和严格的类型转换
-        # =======================================================
-        dq_val = tl.dot(ds.to(q.dtype), k)  # 这里计算出来的 dq_val 是 fp32
+        dq_val = tl.dot(ds.to(q.dtype), k)  
         
-        # 计算原始内存地址 (因为 atomic_add 不支持 block_ptr)
         dq_ptrs = DQ + qvk_offset + (offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk)
         
-        # 将 fp32 强转回 fp16 并原子相加
         tl.atomic_add(dq_ptrs, dq_val.to(q.dtype)) 
         
-        # 计算 dK = dS^T * Q
         dk += tl.dot(tl.trans(ds.to(q.dtype)), q)
         
-        # 移动指针
         Q_block_ptr = tl.advance(Q_block_ptr, (BLOCK_M, 0))
         DO_block_ptr = tl.advance(DO_block_ptr, (BLOCK_M, 0))
         
-    # 写入 dK, dV (这里我们将累加完毕的 fp32 转换回外层 tensor 的类型)
     DK_block_ptr = tl.make_block_ptr(
         base=DK + qvk_offset,
         shape=(N_CTX, BLOCK_DMODEL),
@@ -304,7 +279,7 @@ class _TritonAttention(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, q, k, v, causal, sm_scale):
-        # 形状检查 [batch, num_heads, seq_len, head_dim]
+        # [batch, num_heads, seq_len, head_dim]
         # Triton tutorial standard layout requires specific contiguity
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk == Lv
@@ -315,12 +290,10 @@ class _TritonAttention(torch.autograd.Function):
         
         batch, heads, seq_len, head_dim = q.shape
         
-        # 准备输出和中间变量
         out = torch.empty_like(q)
         M = torch.empty((batch, heads, seq_len), device=q.device, dtype=torch.float32)
         L = torch.empty((batch, heads, seq_len), device=q.device, dtype=torch.float32)
         
-        # 针对前向的 Block 划分配置
         BLOCK_M = 64
         BLOCK_N = 64 if head_dim > 64 else 128
         
@@ -343,7 +316,6 @@ class _TritonAttention(torch.autograd.Function):
     def backward(ctx, do):
         q, k, v, out, L, M = ctx.saved_tensors
         
-        # 必须保证 do 连续
         do = do.contiguous()
         dq = torch.zeros_like(q)
         dk = torch.empty_like(k)
@@ -355,7 +327,6 @@ class _TritonAttention(torch.autograd.Function):
         BLOCK_M = 64
         BLOCK_N = 64
         
-        # Preprocess grid
         grid_prep = (triton.cdiv(seq_len, BLOCK_M), batch * heads)
         _bwd_preprocess[grid_prep](out,do,delta,out.stride(0), out.stride(1), out.stride(2), out.stride(3),
             do.stride(0), do.stride(1), do.stride(2), do.stride(3),
@@ -363,7 +334,6 @@ class _TritonAttention(torch.autograd.Function):
             BLOCK_M=BLOCK_M, D_HEAD=head_dim,
         )
         
-        # Backward grid
         grid_bwd = (triton.cdiv(seq_len, BLOCK_N), batch * heads, 1)
         _bwd_kernel[grid_bwd](q,k,v,ctx.sm_scale,out,do,dq,dk,dv,L,M,delta,q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
@@ -380,12 +350,12 @@ class _TritonAttention(torch.autograd.Function):
 
 def triton_flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = True, sm_scale: float = None):
     """
-    通用后备的 Triton FlashAttention (支持 Forward / Backward)
+    Universal backup Triton FlashAttention (support Forward / Backward)
     
     Args:
-        q, k, v: Tensors of shape [batch, num_heads, seq_len, head_dim]. 建议转为连续内存(.contiguous())。
-        causal: 是否开启因果掩码 (Causal Masking)。
-        sm_scale: Softmax 的缩放因子，默认 1.0 / sqrt(head_dim)。
+        q, k, v: Tensors of shape [batch, num_heads, seq_len, head_dim]. It is recommended to switch to contiguous memory (.contiguous()).
+    causal: Whether to turn on causal masking.
+    sm_scale: Softmax scaling factor, default to 1.0 / sqrt(head_dim).
     Returns:
         Attention Output tensor of shape [batch, num_heads, seq_len, head_dim]
     """
