@@ -48,34 +48,24 @@ class SamplerBackend(nn.Module):
             logits = logits / temperature
 
         if self.backend == constants.BackendLib.FLASHINFER.value:
-            from flashinfer.sampling import (
-                sampling_from_logits,
-                top_k_renorm_probs,
-                top_k_top_p_sampling_from_logits,
-                top_p_sampling_from_probs,
-            )
+            from flashinfer.sampling import top_k_renorm_probs, top_p_sampling_from_probs
 
             logits = logits.float().contiguous()
             if temperature != 1.0:
                 logits.div_(temperature)
+
+            probs = torch.softmax(logits, dim=-1)
+
             if top_k is None and top_p is None:
-                return sampling_from_logits(logits, deterministic=deterministic)
-
-            if top_k is not None and top_p is not None:
-                return top_k_top_p_sampling_from_logits(
-                    logits, top_k, top_p, deterministic=deterministic
-                )
-
-            if top_p is not None:
-                probs = torch.softmax(logits, dim=-1)
-                return top_p_sampling_from_probs(probs, top_p, deterministic=deterministic)
+                return torch.multinomial(probs, num_samples=1).view(-1)
 
             if top_k is not None:
-                probs = torch.softmax(logits, dim=-1)
-                renorm_probs = top_k_renorm_probs(probs, top_k)
-                return torch.multinomial(renorm_probs, num_samples=1).view(-1)
+                probs = top_k_renorm_probs(probs, top_k)
 
-            return sampling_from_logits(logits, deterministic=deterministic)
+            if top_p is not None:
+                return top_p_sampling_from_probs(probs, top_p, deterministic=deterministic)
+
+            return torch.multinomial(probs, num_samples=1).view(-1)
 
         elif self.backend == constants.BackendLib.AITER.value:
             # TODO: Connect to AITER's sampling operator

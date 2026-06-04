@@ -91,9 +91,9 @@ def run_benchmark(args, return_data: bool = False):
     if return_data:
         return raw_metrics
 
-    headers = ["Batch Size (G)", "Native Latency", "RL-Engine (FlashInfer)", "Speedup"]
+    headers = ["Batch Size (G)", "Native Latency", "RL-Kernel", "Speedup"]
     print("\n" + "=" * 80)
-    print(f"RL-ENGINE SAMPLING BENCHMARK REPORT (TopK={args.top_k}, TopP={args.top_p})")
+    print(f"RL-KERNEL SAMPLING BENCHMARK REPORT (TopK={args.top_k}, TopP={args.top_p})")
     print("=" * 80)
     print(tabulate(results, headers=headers, tablefmt="fancy_grid"))
     print("=" * 80 + "\n")
