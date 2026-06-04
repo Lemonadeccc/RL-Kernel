@@ -34,6 +34,10 @@ By implementing **Pre-allocated Chunking**, RL-Kernel maintains constant additio
 
 *Note: RL-Kernel is the only solution that successfully scales G=256 on a single A100 by keeping extra VRAM usage to a constant ~0.5GB.*
 
+<p align="center">
+  <img src="docs/assets/1. VRAM Saving.png" alt="Logprob VRAM Benchmark">
+</p>
+
 ### 2. Sampling Latency (Rollout Speed)
 Integrating **FlashInfer** fused kernels to accelerate the bottleneck of RL training: the sampling phase.
 
@@ -45,6 +49,20 @@ Integrating **FlashInfer** fused kernels to accelerate the bottleneck of RL trai
 | 256 | 36.23 ms | **2.94 ms** | **12x** |
 
 ---
+
+<p align="center">
+  <img src="docs/assets/2. sampling latency.png" alt="Sampling Latency Benchmark">
+</p>
+
+### 3. Real Model Validation (Qwen3-30B-A3B MoE)
+
+**Testbed**: NVIDIA A100 80GB | **Model**: Qwen3-30B-A3B | **Vocab**: 151,936 | **dtype**: fp16
+
+Model weights consume 56.9 GB — only 23 GB headroom remaining for training computation.
+
+<p align="center">
+  <img src="docs/assets/3. moe .png" alt="Real Model MoE Benchmark">
+</p>
 
 ## Key Features
 
