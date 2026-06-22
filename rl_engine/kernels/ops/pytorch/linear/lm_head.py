@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Optional
 
 import torch
@@ -29,7 +30,6 @@ class NativeLMHeadOp:
     equality. Axis-A batch invariance still holds bitwise within a single dtype
     (each output row reduces over ``hidden`` independently of the batch).
     """
-
 
     def __init__(self) -> None:
         """No state; the op is a pure function over (hidden, weight, bias)."""
@@ -66,9 +66,18 @@ class NativeLMHeadOp:
         *,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Ground truth: upcast to fp32, accumulate in fp32, force fp32 output."""
+        """Ground truth: upcast to fp32, accumulate in fp32, force fp32 output.
+
+        The matmul is wrapped to disable autocast and TF32 so this stays a true
+        fp32 reference regardless of the caller's ambient precision context.
+        """
         return self._lm_head(
-            hidden, weight, bias, compute_dtype=torch.float32, output_dtype=torch.float32
+            hidden,
+            weight,
+            bias,
+            compute_dtype=torch.float32,
+            output_dtype=torch.float32,
+            strict_fp32=True,
         )
 
     # ------------------------------------------------------------------ #
@@ -82,12 +91,34 @@ class NativeLMHeadOp:
         *,
         compute_dtype: torch.dtype,
         output_dtype: torch.dtype,
+        strict_fp32: bool = False,
     ) -> torch.Tensor:
-        """Core matmul: cast to ``compute_dtype``, project, optionally add bias, cast out."""
+        """Core matmul: cast to ``compute_dtype``, project, optionally add bias, cast out.
+
+        When ``strict_fp32`` is set, the matmul runs with autocast disabled and
+        CUDA TF32 turned off so the fp32 reference path is not silently downcast
+        by the caller's ambient autocast/TF32 settings.
+        """
         h = hidden.to(compute_dtype)
         w = weight.to(compute_dtype)
         # [..., hidden] @ [hidden, vocab] -> [..., vocab]; weight is [vocab, hidden] (HF [out, in]).
-        out = h @ w.t()
+        if strict_fp32:
+            with NativeLMHeadOp._strict_fp32_matmul(h.device.type):
+                out = h @ w.t()
+        else:
+            out = h @ w.t()
         if bias is not None:
             out = out + bias.to(compute_dtype)
         return out.to(output_dtype)
+
+    @staticmethod
+    @contextmanager
+    def _strict_fp32_matmul(device_type: str):
+        """Disable autocast and TF32 for a true fp32 matmul, restoring state after."""
+        prev_tf32 = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = False
+        try:
+            with torch.autocast(device_type=device_type, enabled=False):
+                yield
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = prev_tf32

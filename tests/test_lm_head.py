@@ -94,17 +94,81 @@ def _rand_weight(vocab=_VOCAB, hidden=_HIDDEN, *, seed, dtype=torch.float32):
 
 
 # Correctness of the fp32 ground truth: forward_fp32 == naive fp32 matmul,
-# bitwise. The fp32 dtype path (forward) is identical to the ground truth, so
-# it too is bitwise equal -- only bf16/fp16 introduce drift.
+# bitwise. forward_fp32 disables autocast/TF32, so it is a true fp32 reference
+# unconditionally. The fp32 dtype path (forward) follows the ambient precision
+# context, so it is bitwise-equal to the ground truth only when TF32/autocast is
+# off (the default here); only bf16/fp16 introduce drift.
 def test_native_lm_head_fp32_matches_naive_matmul():
-    """forward_fp32 (and the fp32 forward path) is bitwise-equal to a naive fp32 matmul."""
+    """forward_fp32 (and the fp32 forward path, with ambient TF32 off) is bitwise-equal to a naive fp32 matmul."""
     hidden = _rand_hidden(2, 5, seed=1)
     weight = _rand_weight(seed=1)
 
-    naive = hidden.float() @ weight.float().t()
-    assert torch.equal(NativeLMHeadOp().forward_fp32(hidden, weight), naive)
-    # fp32 forward path computes in fp32 too -> bitwise equal to ground truth.
-    assert torch.equal(NativeLMHeadOp().forward(hidden, weight), naive)
+    # Pin TF32 off so the fp32 forward path and the naive reference below are both
+    # true fp32 regardless of the machine's global default, making this assertion
+    # deterministic. forward_fp32 disables TF32 internally and does not need this.
+    prev_tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        naive = hidden.float() @ weight.float().t()
+        assert torch.equal(NativeLMHeadOp().forward_fp32(hidden, weight), naive)
+        # fp32 forward path computes in fp32 too -> bitwise equal to ground truth.
+        assert torch.equal(NativeLMHeadOp().forward(hidden, weight), naive)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_tf32
+
+
+def test_forward_fp32_ignores_ambient_autocast_and_restores_tf32():
+    """forward_fp32 is a strict fp32 reference under ambient autocast/TF32 settings."""
+    op = NativeLMHeadOp()
+    hidden = _rand_hidden(2, 5, hidden=32, seed=11)
+    weight = _rand_weight(vocab=7, hidden=32, seed=11)
+    gen = torch.Generator().manual_seed(11)
+    bias = torch.randn(7, generator=gen)
+    ref = hidden.float() @ weight.float().t() + bias.float()
+
+    prev_tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            out = op.forward_fp32(hidden, weight, bias=bias)
+
+        assert out.dtype == torch.float32
+        assert torch.equal(out, ref)
+        assert torch.backends.cuda.matmul.allow_tf32 is True
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_tf32
+
+
+# GPU counterpart of the test above: TF32 only changes the numbers on CUDA, so
+# the "TF32 is disabled" half of forward_fp32 can only be exercised on a GPU.
+# With TF32 forced on globally, forward_fp32 must stay true fp32 (tight against a
+# high-precision fp64 reference) and never be worse than a plain TF32 matmul. The
+# assertion holds whether or not the GPU actually uses TF32 for fp32 matmul.
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU to exercise TF32")
+def test_forward_fp32_disables_tf32_on_gpu():
+    """On a TF32-enabled GPU, forward_fp32 stays true fp32, no worse than a TF32 matmul."""
+    device = torch.device("cuda")
+    gen = torch.Generator(device=device).manual_seed(21)
+    hidden = torch.randn(2, 16, _HIDDEN, generator=gen, dtype=torch.float32, device=device)
+    weight = torch.randn(256, _HIDDEN, generator=gen, dtype=torch.float32, device=device)
+    ref = (hidden.double() @ weight.double().t()).float()  # high-precision reference
+
+    prev_tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True  # hostile ambient setting
+    try:
+        strict = NativeLMHeadOp().forward_fp32(hidden, weight)  # must ignore TF32
+        tf32 = hidden @ weight.t()  # plain matmul -> TF32 if the GPU supports it
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_tf32
+
+    peak = ref.abs().max().item()
+    strict_err = (strict - ref).abs().max().item()
+    tf32_err = (tf32 - ref).abs().max().item()
+    print(f"\n[lm_head fp32-vs-tf32] strict_err={strict_err:.3g} tf32_err={tf32_err:.3g} peak={peak:.3g}")
+    # forward_fp32 is fp32-tight (well under the TF32 ~10-bit-mantissa drift floor)...
+    assert strict_err <= 1.0e-3 * peak
+    # ...and never worse than a plain matmul (far tighter when the GPU uses TF32).
+    assert strict_err <= tf32_err
 
 
 # Axis-B accuracy: the low-precision dtype path drifts from the fp32 reference

@@ -27,7 +27,9 @@ The op exposes the WS1 dual-path contract:
 - `forward(...)` — projects in the input dtype, returns the input dtype (Axis-B accuracy
   candidate / dtype-behavior path).
 - `forward_fp32(...)` — upcasts to fp32, accumulates in fp32, returns fp32 (the
-  ground-truth golden path).
+  ground-truth golden path). The matmul runs with autocast disabled and CUDA TF32
+  turned off, so it stays a true fp32 reference regardless of the caller's ambient
+  precision context (the global `allow_tf32` flag is saved and restored around it).
 
 ## Backends
 
@@ -69,11 +71,16 @@ if bias is not None:
     out = out + bias.float()
 ```
 
-- **Ground truth**: `forward_fp32` accumulates in and returns fp32.
+- **Ground truth**: `forward_fp32` accumulates in and returns fp32, with autocast and
+  CUDA TF32 disabled so it is a true fp32 reference even if the caller has TF32 or
+  autocast enabled.
 - **Dtype path**: `forward` runs the projection in the input dtype. Because this is a
   reduction over `hidden`, low-precision accumulation **drifts** from the fp32 reference
-  (unlike the lossless embedding gather). The fp32 dtype path is bitwise-equal to the
-  ground truth; bf16/fp16 are checked with a tolerance.
+  (unlike the lossless embedding gather). Unlike `forward_fp32`, this path intentionally
+  follows the ambient precision context (it is the dtype-behavior path): with an fp32
+  input it is bitwise-equal to the ground truth **when ambient TF32/autocast is off**, but
+  on a TF32-enabled GPU it tracks real hardware behavior and may drift. bf16/fp16 are
+  always checked with a tolerance.
 - **Axis-B — accuracy tolerance**: measured as max absolute error relative to the output
   peak magnitude. On a SMALL load point with the real `hidden=4096` reduction length,
   bf16 drifts ~0.3–0.4% of peak and fp16 ~0.05%. Elementwise `rtol` is not used: many
@@ -98,12 +105,14 @@ own benchmarks and are measured against this reference for correctness.
 python -m pytest tests/test_lm_head.py -v
 ```
 
-Covers: fp32 correctness vs naive matmul (bitwise), bf16/fp16 dtype-path accuracy
-(relative-to-peak tolerance, with `bias`), output shape, bias semantics, Axis-A batch
-invariance (slice + padding, single-thread reduction, all dtypes), input purity, gradient
-flow to `hidden`/`weight` (closed-form check), registry dispatch, and a GPU-only smoke test
-at the real Qwen3-8B dims (`vocab=151936, hidden=4096`) that skips when CUDA or GPU memory
-is unavailable.
+Covers: fp32 correctness vs naive matmul (bitwise, with ambient TF32 pinned off),
+`forward_fp32` precision-context safety (true fp32 under ambient autocast + restores the
+global TF32 flag on CPU; numerically beats a TF32 matmul on GPU), bf16/fp16 dtype-path
+accuracy (relative-to-peak tolerance, with `bias`), output shape, bias semantics, Axis-A
+batch invariance (slice + padding, single-thread reduction, all dtypes), input purity,
+gradient flow to `hidden`/`weight` (closed-form check), registry dispatch, and a GPU-only
+smoke test at the real Qwen3-8B dims (`vocab=151936, hidden=4096`) that skips when CUDA or
+GPU memory is unavailable.
 
 ## Implementation Files
 
