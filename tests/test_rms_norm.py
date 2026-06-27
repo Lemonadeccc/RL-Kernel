@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from rl_engine.kernels.ops.pytorch.norm.rms_norm import NativeRMSNormOp
 
@@ -25,7 +26,22 @@ def _manual_rms_norm(x, weight, *, eps=_EPS):
     return x_f * torch.rsqrt(var + eps) * weight.float()
 
 
-# 1. Correctness vs an independent fp32 formula (both normalized dims)
+# 1. Primary correctness check vs PyTorch's own F.rms_norm. This is a *truly*
+# independent implementation -- it may reduce in a different float order than
+# our op, so a shared formula bug (eps placement, wrong reduction dim) cannot
+# hide here. Tolerance-based (assert_close), NOT torch.equal, precisely because
+# the reduction order is allowed to differ.
+@pytest.mark.parametrize("N", [_HIDDEN, _HEAD_DIM])
+def test_forward_fp32_matches_torch_reference(N):
+    op = NativeRMSNormOp()
+    x, w = _rand((2, 16, N), seed=0), _rand((N,), seed=1)
+    ref = F.rms_norm(x.float(), (N,), weight=w.float(), eps=_EPS)
+    torch.testing.assert_close(op.forward_fp32(x, w), ref, rtol=1e-6, atol=1e-6)
+
+
+# 1b. Secondary sanity check vs a hand-written fp32 formula in the same float
+# order -> bitwise equal. Pins the exact reference semantics; the F.rms_norm
+# test above is the independent guard against a formula bug.
 @pytest.mark.parametrize("N", [_HIDDEN, _HEAD_DIM])
 def test_forward_fp32_matches_manual_reference(N):
     op = NativeRMSNormOp()
@@ -119,6 +135,28 @@ def test_gradient_flows():
     w = _rand((_HIDDEN,), seed=14).requires_grad_(True)
     op.forward_fp32(x, w).sum().backward()
     assert torch.isfinite(x.grad).all() and torch.isfinite(w.grad).all()
+
+
+# 9b. Axis A for gradients -- backward must be batch-invariant too (needed for
+# #153). Slicing the batch must yield bitwise-identical input gradients to the
+# full-batch backward. Compute on the full batch, then compare against a
+# batch-of-1 recompute fed the matching slice of the upstream gradient.
+def test_backward_batch_invariance_slice():
+    op = NativeRMSNormOp()
+
+    w_full = _rand((_HIDDEN,), seed=1).requires_grad_(True)
+    x_full = _rand((8, 32, _HIDDEN), seed=2).requires_grad_(True)
+    out_full = op.forward_fp32(x_full, w_full)
+    dy_full = _rand(out_full.shape, seed=3)
+    out_full.backward(dy_full)
+    grad_x_full_sliced = x_full.grad[:1].clone()
+
+    w_slice = _rand((_HIDDEN,), seed=1).requires_grad_(True)
+    x_slice = _rand((8, 32, _HIDDEN), seed=2)[:1].detach().requires_grad_(True)
+    out_slice = op.forward_fp32(x_slice, w_slice)
+    out_slice.backward(dy_full[:1])  # matching slice of the upstream gradient
+
+    assert torch.equal(x_slice.grad, grad_x_full_sliced)
 
 
 # 10. Registry dispatch resolves to the native op
