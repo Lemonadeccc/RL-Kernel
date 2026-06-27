@@ -489,7 +489,7 @@ def _coerce_hidden_tensor(
                 return hidden
     if hasattr(candidate, "hidden_states"):
         hidden = _last_hidden_state_tensor(
-            getattr(candidate, "hidden_states"),
+            candidate.hidden_states,
             expected_hidden_dim=expected_hidden_dim,
         )
         if hidden is not None:

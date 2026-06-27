@@ -650,6 +650,94 @@ def test_sm90_rejects_out_of_range_target():
     assert out.shape == target.shape and torch.isfinite(out).all()
 
 
+def test_sm90_tp_metadata_prefers_sm90_tp_helper(monkeypatch):
+    from rl_engine.kernels.ops.cuda.loss import linear_logp as cuda_linear_logp
+
+    op = object.__new__(cuda_linear_logp.FusedLinearLogpSM90Op)
+    hidden = torch.randn(2, 4)
+    weight = torch.randn(3, 4)
+    target = torch.tensor([3, 5])
+    sentinel = torch.full((2,), 7.0)
+    tp_group = object()
+    calls = {}
+
+    monkeypatch.setattr(
+        cuda_linear_logp,
+        "should_use_tensor_parallel_linear_logp",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(cuda_linear_logp, "_sm90_supported", lambda h, w: True)
+
+    def fake_sm90_tp(hidden_arg, weight_arg, target_arg, bias_arg, **kwargs):
+        calls["sm90_tp"] = (hidden_arg, weight_arg, target_arg, bias_arg, kwargs)
+        return sentinel
+
+    def forbidden_portable_tp(*args, **kwargs):
+        raise AssertionError("portable TP path should not run when SM90 TP is available")
+
+    monkeypatch.setattr(cuda_linear_logp, "_sm90_tensor_parallel_linear_logp", fake_sm90_tp)
+    monkeypatch.setattr(cuda_linear_logp, "tensor_parallel_linear_logp", forbidden_portable_tp)
+
+    out = op(
+        hidden,
+        weight,
+        target,
+        tp_group=tp_group,
+        vocab_start_index=3,
+        global_vocab_size=6,
+    )
+
+    assert out is sentinel
+    assert calls["sm90_tp"][0] is hidden
+    assert calls["sm90_tp"][1] is weight
+    assert calls["sm90_tp"][2] is target
+    assert calls["sm90_tp"][4] == {
+        "tp_group": tp_group,
+        "vocab_start_index": 3,
+        "global_vocab_size": 6,
+    }
+
+
+def test_sm90_tp_metadata_falls_back_to_portable_tp_when_sm90_unsupported(monkeypatch):
+    from rl_engine.kernels.ops.cuda.loss import linear_logp as cuda_linear_logp
+
+    op = object.__new__(cuda_linear_logp.FusedLinearLogpSM90Op)
+    hidden = torch.randn(2, 4)
+    weight = torch.randn(3, 4)
+    target = torch.tensor([3, 5])
+    sentinel = torch.full((2,), 11.0)
+
+    monkeypatch.setattr(
+        cuda_linear_logp,
+        "should_use_tensor_parallel_linear_logp",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(cuda_linear_logp, "_sm90_supported", lambda h, w: False)
+    monkeypatch.setattr(
+        cuda_linear_logp,
+        "_sm90_tensor_parallel_linear_logp",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("SM90 TP helper should not run for unsupported inputs")
+        ),
+    )
+    monkeypatch.setattr(
+        cuda_linear_logp,
+        "tensor_parallel_linear_logp",
+        lambda *args, **kwargs: sentinel,
+    )
+
+    out = op(
+        hidden,
+        weight,
+        target,
+        tp_group=object(),
+        vocab_start_index=3,
+        global_vocab_size=6,
+    )
+
+    assert out is sentinel
+
+
 def test_registry_dispatch_matches_native():
     from rl_engine.kernels.registry import kernel_registry
     from rl_engine.platforms.device import device_ctx
